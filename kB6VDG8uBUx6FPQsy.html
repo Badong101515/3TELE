@@ -1,0 +1,471 @@
+<html><head><base href="." />
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ricardo Ahillon Jr - Premium Video Conferencing</title>
+
+<!-- Firebase SDK -->
+<script type="module">
+  // Import the functions you need from the SDKs you need
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/9.22.1/firebase-app.js";
+  import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, updateProfile } from "https://www.gstatic.com/firebasejs/9.22.1/firebase-auth.js";
+  import { getDatabase, ref, set, get } from "https://www.gstatic.com/firebasejs/9.22.1/firebase-database.js";
+
+  // Your web app's Firebase configuration
+  const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_AUTH_DOMAIN",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_STORAGE_BUCKET",
+    messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+    appId: "YOUR_APP_ID"
+  };
+
+  // Initialize Firebase
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const database = getDatabase(app);
+
+  // Make functions available globally
+  window.auth = auth;
+  window.database = database;
+  window.dbRef = ref;
+  window.dbSet = set;
+  window.dbGet = get;
+  window.createUser = createUserWithEmailAndPassword;
+  window.signIn = signInWithEmailAndPassword;
+  window.onAuthStateChanged = onAuthStateChanged;
+  window.updateProfile = updateProfile;
+
+  let currentUser = null;
+  let peer = null;
+  let localStream = null;
+  let peers = {};
+  let isModerator = false;
+
+  function toggleForms() {
+    const loginForm = document.getElementById('loginForm');
+    const signupForm = document.getElementById('signupForm');
+    loginForm.style.display = loginForm.style.display === 'none' ? 'block' : 'none';
+    signupForm.style.display = signupForm.style.display === 'none' ? 'block' : 'none';
+  }
+
+  async function signup() {
+    const email = document.getElementById('signupEmail').value;
+    const password = document.getElementById('signupPassword').value;
+    const name = document.getElementById('signupName').value;
+
+    try {
+      const userCredential = await window.createUser(window.auth, email, password);
+      await window.updateProfile(userCredential.user, {
+        displayName: name
+      });
+      await window.dbSet(window.dbRef(window.database, `users/${userCredential.user.uid}`), {
+        name: name,
+        email: email
+      });
+    } catch (error) {
+      alert(error.message);
+    }
+  }
+
+  async function login() {
+    const email = document.getElementById('loginEmail').value;
+    const password = document.getElementById('loginPassword').value;
+
+    try {
+      await window.signIn(window.auth, email, password);
+    } catch (error) {
+      alert(error.message);
+    }
+  }
+
+  window.onAuthStateChanged(window.auth, async (user) => {
+    if (user) {
+      currentUser = user;
+      document.getElementById('authContainer').style.display = 'none';
+      document.getElementById('meetingContainer').style.display = 'block';
+      initializeMeeting();
+    } else {
+      document.getElementById('authContainer').style.display = 'block';
+      document.getElementById('meetingContainer').style.display = 'none';
+    }
+  });
+
+  async function initializeMeeting() {
+    peer = new Peer(currentUser.uid, {
+      host: 'your-peerjs-server',
+      port: 443,
+      secure: true
+    });
+
+    peer.on('open', (id) => {
+      startLocalStream();
+    });
+
+    peer.on('call', handleIncomingCall);
+  }
+
+  async function startLocalStream() {
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true
+      });
+      addVideoStream(currentUser.uid, localStream, currentUser.displayName);
+    } catch (error) {
+      console.error('Error accessing media devices:', error);
+    }
+  }
+
+  function addVideoStream(userId, stream, username) {
+    const videoBox = document.createElement('div');
+    videoBox.className = 'video-box';
+    videoBox.id = `video-${userId}`;
+
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    video.autoplay = true;
+    video.playsInline = true;
+
+    const nameTag = document.createElement('div');
+    nameTag.className = 'participant-name';
+    nameTag.textContent = username;
+
+    videoBox.appendChild(video);
+    videoBox.appendChild(nameTag);
+    document.getElementById('videoGrid').appendChild(videoBox);
+  }
+
+  function handleIncomingCall(call) {
+    call.answer(localStream);
+    call.on('stream', (remoteStream) => {
+      get(window.dbRef(window.database, `users/${call.peer}`)).then((snapshot) => {
+        const userData = snapshot.val();
+        addVideoStream(call.peer, remoteStream, userData.name);
+      });
+    });
+  }
+
+  function createMeeting() {
+    isModerator = true;
+    const meetingId = generateMeetingId();
+    document.getElementById('moderatorControls').style.display = 'block';
+    document.getElementById('meetingInfo').style.display = 'block';
+    document.getElementById('meetingInfo').textContent = `Meeting ID: ${meetingId}`;
+    
+    window.dbSet(window.dbRef(window.database, `meetings/${meetingId}`), {
+      moderator: currentUser.uid,
+      participants: {
+        [currentUser.uid]: {
+          name: currentUser.displayName,
+          role: 'moderator'
+        }
+      }
+    });
+  }
+
+  function joinMeeting(meetingId) {
+    window.dbGet(window.dbRef(window.database, `meetings/${meetingId}`)).then((snapshot) => {
+      const meetingData = snapshot.val();
+      if (meetingData) {
+        window.dbSet(window.dbRef(window.database, `meetings/${meetingId}/participants/${currentUser.uid}`), {
+          name: currentUser.displayName,
+          role: 'participant'
+        });
+
+        const call = peer.call(meetingData.moderator, localStream);
+        call.on('stream', (remoteStream) => {
+          addVideoStream(meetingData.moderator, remoteStream, meetingData.participants[meetingData.moderator].name);
+        });
+      }
+    });
+  }
+
+  document.getElementById('toggleAudio').onclick = () => {
+    const audioTrack = localStream.getAudioTracks()[0];
+    audioTrack.enabled = !audioTrack.enabled;
+    document.getElementById('toggleAudio').innerHTML = 
+      audioTrack.enabled ? '<i class="fas fa-microphone"></i>' : '<i class="fas fa-microphone-slash"></i>';
+  };
+
+  document.getElementById('toggleVideo').onclick = () => {
+    const videoTrack = localStream.getVideoTracks()[0];
+    videoTrack.enabled = !videoTrack.enabled;
+    document.getElementById('toggleVideo').innerHTML = 
+      videoTrack.enabled ? '<i class="fas fa-video"></i>' : '<i class="fas fa-video-slash"></i>';
+  };
+
+  document.getElementById('shareScreen').onclick = async () => {
+    try {
+      const screenStream = await navigator.mediaDevices.getDisplayMedia();
+      const videoTrack = screenStream.getVideoTracks()[0];
+      
+      videoTrack.onended = () => {
+        startLocalStream();
+      };
+
+      Object.values(peers).forEach((call) => {
+        const sender = call.peerConnection.getSenders().find(s => s.track.kind === 'video');
+        sender.replaceTrack(videoTrack);
+      });
+    } catch (error) {
+      console.error('Error sharing screen:', error);
+    }
+  };
+
+  document.getElementById('leaveCall').onclick = () => {
+    localStream.getTracks().forEach(track => track.stop());
+    Object.values(peers).forEach(call => call.close());
+    peer.destroy();
+    window.location.reload();
+  };
+
+  function generateMeetingId() {
+    return Math.random().toString(36).substring(2, 15);
+  }
+
+  window.onbeforeunload = () => {
+    if (localStream) {
+      localStream.getTracks().forEach(track => track.stop());
+    }
+    if (peer) {
+      peer.destroy();
+    }
+  };
+</script>
+
+<style>
+:root {
+  --primary: #1a73e8;
+  --secondary: #185abc;
+  --success: #34a853;
+  --danger: #ea4335;
+  --warning: #fbbc04;
+  --dark: #202124;
+  --light: #ffffff;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  font-family: 'Google Sans', Arial, sans-serif;
+}
+
+body {
+  background: var(--dark);
+  color: var(--light);
+  min-height: 100vh;
+}
+
+.auth-container {
+  max-width: 400px;
+  margin: 50px auto;
+  padding: 2rem;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  backdrop-filter: blur(10px);
+}
+
+.form-group {
+  margin-bottom: 1.5rem;
+}
+
+.form-control {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--light);
+  font-size: 16px;
+}
+
+.form-control:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.btn {
+  width: 100%;
+  padding: 12px;
+  border: none;
+  border-radius: 6px;
+  font-size: 16px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: white;
+}
+
+.btn-primary:hover {
+  background: var(--secondary);
+}
+
+.video-container {
+  display: none;
+  padding: 20px;
+}
+
+.video-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+  padding: 20px;
+}
+
+.video-box {
+  position: relative;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.video-box video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.participant-name {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.controls {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.8);
+  padding: 15px;
+  border-radius: 50px;
+  z-index: 1000;
+}
+
+.control-btn {
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.control-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.moderator-controls {
+  position: fixed;
+  right: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(0, 0, 0, 0.8);
+  padding: 15px;
+  border-radius: 12px;
+  display: none;
+}
+
+.participant-list {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.participant-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.meeting-info {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.8);
+  padding: 10px 20px;
+  border-radius: 25px;
+  display: none;
+}
+
+</style>
+</head>
+<body>
+
+<div id="authContainer" class="auth-container">
+  <h2 style="text-align: center; margin-bottom: 2rem;">Ricardo Ahillon Jr Meeting</h2>
+  
+  <!-- Login Form -->
+  <div id="loginForm">
+    <div class="form-group">
+      <input type="email" class="form-control" id="loginEmail" placeholder="Email">
+    </div>
+    <div class="form-group">
+      <input type="password" class="form-control" id="loginPassword" placeholder="Password">
+    </div>
+    <button class="btn btn-primary" onclick="login()">Login</button>
+    <p style="text-align: center; margin-top: 1rem;">
+      Don't have an account? <a href="#" onclick="toggleForms()">Sign up</a>
+    </p>
+  </div>
+
+  <!-- Sign Up Form -->
+  <div id="signupForm" style="display: none;">
+    <div class="form-group">
+      <input type="text" class="form-control" id="signupName" placeholder="Full Name">
+    </div>
+    <div class="form-group">
+      <input type="email" class="form-control" id="signupEmail" placeholder="Email">
+    </div>
+    <div class="form-group">
+      <input type="password" class="form-control" id="signupPassword" placeholder="Password">
+    </div>
+    <button class="btn btn-primary" onclick="signup()">Sign Up</button>
+    <p style="text-align: center; margin-top: 1rem;">
+      Already have an account? <a href="#" onclick="toggleForms()">Login</a>
+    </p>
+  </div>
+</div>
+
+<div id="meetingContainer" style="display: none;">
+  <div class="meeting-info" id="meetingInfo"></div>
+  <div class="video-grid" id="videoGrid"></div>
+  
+  <div class="controls">
+    <button class="control-btn" id="toggleAudio">
+      <i class="fas fa-microphone"></i>
+    </button>
+    <button class="control-btn" id="toggleVideo">
+      <i class="fas fa-video"></i>
+    </button>
+    <button class="control-btn" id="shareScreen">
+      <i class="fas fa-desktop"></i>
+    </button>
+    <button class="control-btn" id="leaveCall" style="background: var(--danger);">
+      <i class="fas fa-phone-slash"></i>
+    </button>
+  </div>
+
+  <div class="moderator-controls" id="moderatorControls">
+    <h3>Participants</h3>
+    <div class="participant-list" id="participantList"></div>
+  </div>
+</div>
+
+</body></html>
